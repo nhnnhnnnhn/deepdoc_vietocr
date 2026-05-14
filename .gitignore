@@ -6,12 +6,23 @@
 
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+*.tmp
 
 log/
+*.log
 output/
 web_runs/
 conf/ocr_correction_memory.json
 venv/
+.venv/
 .gitnexus
 .claude/
 input/

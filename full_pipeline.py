@@ -2,15 +2,11 @@ import logging
 import os
 import sys
 import argparse
-import base64
 import difflib
-import hashlib
-import io
 import json
 import numpy as np
 import re
 import time
-import requests
 
 sys.path.insert(
     0,
@@ -22,99 +18,32 @@ sys.path.insert(
 
 from module.ocr import OCR, resolve_device
 from module import LayoutRecognizer, TableStructureRecognizer, init_in_out
+from utils.ai_postcheck import format_token_usage, get_gemini_api_key, run_gemini_postcheck
+from utils.document_analysis import add_text_risks, apply_heading_detection, page_has_multicolumn_layout
+from utils.pipeline_artifacts import (
+    correction_rule_id,
+    load_correction_memory as load_correction_memory_payload,
+    merged_markdown_output_path,
+    metadata_output_path,
+    ocr_raw_output_path,
+    relative_output_path,
+    save_correction_memory as save_correction_memory_payload,
+    vlm_checked_output_path,
+    vlm_review_output_path,
+)
+from utils.runtime_env import configure_run_logging, env_bool, env_value, load_env_file
 
 from datetime import datetime
 
 VISUAL_REGION_TYPES = {"figure", "equation"}
-SENSITIVE_TEXT_RE = re.compile(
-    r"("
-    r"\b\d{1,3}(?:[.,]\d{3})+(?:\s*(?:đồng|vnd|vnđ|usd))?\b"
-    r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
-    r"|\b\d{9,12}\b"
-    r"|\b(?:số|so|mã|ma|mst|cccd|cmnd|hợp\s*đồng|hop\s*dong|đơn|don)\b"
-    r")",
-    re.IGNORECASE,
-)
-AMBIGUOUS_TOKEN_RE = re.compile(
-    r"\b(?=[A-Za-z0-9?]{3,}\b)(?=[A-Za-z?]*[OolIlS?])(?=[A-Za-z0-9?]*\d)[A-Za-z0-9?/-]+\b"
-)
-CHECKBOX_HINT_RE = re.compile(r"(\[[ xX]\]|☐|☑|✓|□|■|checkbox|tick|chọn|chon)", re.IGNORECASE)
 DEFAULT_GEMINI_SYSTEM_PROMPT = os.path.join("conf", "ai_postcheck_system_prompt.txt")
 DEFAULT_CORRECTION_MEMORY_PATH = os.path.join("conf", "ocr_correction_memory.json")
 CORRECTION_MEMORY_VERSION = 1
 CORRECTION_MEMORY_MAX_CHARS = 240
 CORRECTION_MEMORY_MAX_LINES = 4
-DOCUMENT_TITLE_RE = re.compile(
-    r"^(quyết\s*định|thông\s*báo|hợp\s*đồng|tờ\s*trình|báo\s*cáo|biên\s*bản|công\s*văn)\b",
-    re.IGNORECASE,
-)
-CHAPTER_RE = re.compile(r"^(chương|phần|mục)\s+([ivxlcdm]+|\d+)\b", re.IGNORECASE)
-ARTICLE_RE = re.compile(r"^điều\s+\d+[.,:]?\s+.+", re.IGNORECASE)
-NUMBERED_SECTION_RE = re.compile(r"^(\d{1,2})\.\s+\S+")
-NUMBERED_SUBSECTION_RE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.?\s*\S+")
-DENSE_SUBSECTION_RE = re.compile(r"^(\d{2})\.?\s*\D+")
-RECEIVER_RE = re.compile(r"^nơi\s+nhận\b", re.IGNORECASE)
 
 
-def load_env_file(path=".env"):
-    if not os.path.exists(path):
-        return
-
-    with open(path, encoding="utf-8") as f:
-        for raw_line in f:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-
-
-def env_bool(name, default=False):
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def env_value(name, default):
-    return os.environ.get(name, default)
-
-log_dir = "log"
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, "full_pipeline.log")
-
-# Count previous runs by counting lines that start with "=== Run"
-run_count = 1
-if os.path.exists(log_file):    
-    with open(log_file, "r", encoding="utf-8") as f:
-        run_count += sum(1 for line in f if line.startswith("=== Run"))
-
-class TeeStream:
-    def __init__(self, *streams):
-        self.streams = streams
-
-    def write(self, data):
-        for stream in self.streams:
-            stream.write(data)
-            stream.flush()
-        return len(data)
-
-    def flush(self):
-        for stream in self.streams:
-            stream.flush()
-
-    def isatty(self):
-        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
-
-
-log_handle = open(log_file, "a", encoding="utf-8")
-sys.stdout = TeeStream(sys.__stdout__, log_handle)
-sys.stderr = TeeStream(sys.__stderr__, log_handle)
-print(f"\n=== Run {run_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+PIPELINE_LOG_HANDLE = configure_run_logging("log", "full_pipeline.log")
 
 def extract_table_markdown(img, table_region, ocr, table_recognizer, low_score_threshold):
     # Use bbox if present
@@ -185,76 +114,17 @@ def extract_table_markdown(img, table_region, ocr, table_recognizer, low_score_t
     return markdown, confidence
 
 
-def merged_markdown_output_path(page_output_path):
-    output_folder = os.path.dirname(page_output_path)
-    document_name = os.path.basename(output_folder)
-    return os.path.join(output_folder, f"{document_name}_full.md")
-
-
-def metadata_output_path(markdown_output_path):
-    output_folder = os.path.dirname(markdown_output_path)
-    document_name = os.path.basename(output_folder)
-    return os.path.join(output_folder, f"{document_name}_metadata.json")
-
-
-def ocr_raw_output_path(markdown_output_path):
-    output_folder = os.path.dirname(markdown_output_path)
-    document_name = os.path.basename(output_folder)
-    return os.path.join(output_folder, f"{document_name}_ocr_raw.md")
-
-
-def vlm_checked_output_path(markdown_output_path):
-    output_folder = os.path.dirname(markdown_output_path)
-    document_name = os.path.basename(output_folder)
-    return os.path.join(output_folder, f"{document_name}_vlm_checked.md")
-
-
-def vlm_review_output_path(markdown_output_path):
-    output_folder = os.path.dirname(markdown_output_path)
-    document_name = os.path.basename(output_folder)
-    return os.path.join(output_folder, f"{document_name}_vlm_review.json")
-
-
-def relative_output_path(path, base_dir):
-    return os.path.relpath(path, base_dir).replace(os.sep, "/")
-
-
 def resolve_correction_memory_path(args):
     path = getattr(args, "correction_memory_path", None) or DEFAULT_CORRECTION_MEMORY_PATH
     return os.path.abspath(path)
 
 
 def load_correction_memory(path):
-    if not path or not os.path.exists(path):
-        return {"version": CORRECTION_MEMORY_VERSION, "rules": [], "blocked": []}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {"version": CORRECTION_MEMORY_VERSION, "rules": [], "blocked": []}
-    if not isinstance(payload, dict):
-        return {"version": CORRECTION_MEMORY_VERSION, "rules": [], "blocked": []}
-    payload.setdefault("version", CORRECTION_MEMORY_VERSION)
-    payload.setdefault("rules", [])
-    payload.setdefault("blocked", [])
-    if not isinstance(payload["rules"], list):
-        payload["rules"] = []
-    if not isinstance(payload["blocked"], list):
-        payload["blocked"] = []
-    return payload
+    return load_correction_memory_payload(path, CORRECTION_MEMORY_VERSION)
 
 
 def save_correction_memory(path, memory):
-    dir_name = os.path.dirname(path)
-    if dir_name:
-        os.makedirs(dir_name, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(memory, f, ensure_ascii=False, indent=2)
-
-
-def correction_rule_id(wrong, correct):
-    digest = hashlib.sha256(f"{wrong}\0{correct}".encode("utf-8")).hexdigest()
-    return digest[:16]
+    save_correction_memory_payload(path, memory)
 
 
 def correction_similarity(wrong, correct):
@@ -785,105 +655,6 @@ def save_vlm_risk_region(img, bbox, assets_dir, page_number, risk_number, catego
     return asset_path
 
 
-def add_vlm_risk(page_metadata, category, reason, bbox=None, text=None, asset_path=None, severity="medium"):
-    risk = {
-        "risk_id": f"p{page_metadata['page_number']:03d}_r{len(page_metadata['vlm_risks']) + 1:03d}",
-        "page_number": page_metadata["page_number"],
-        "category": category,
-        "severity": severity,
-        "reason": reason,
-    }
-    if bbox is not None:
-        risk["bbox"] = list(bbox)
-    if text:
-        risk["text"] = text[:1000]
-    if asset_path:
-        risk["asset_path"] = asset_path
-    page_metadata["vlm_risks"].append(risk)
-    return risk
-
-
-def page_has_multicolumn_layout(page_metadata):
-    width = page_metadata["width"]
-    height = page_metadata["height"]
-    content_regions = [
-        region for region in page_metadata["layout_regions"]
-        if region["type"] in {"text", "title", "table"} and region["score"] >= 0.15
-    ]
-    left = []
-    right = []
-    for region in content_regions:
-        x0, y0, x1, y1 = region["bbox"]
-        region_width = x1 - x0
-        if region_width > width * 0.68 or (y1 - y0) < height * 0.04:
-            continue
-        center = (x0 + x1) / 2
-        if center < width * 0.48:
-            left.append(region)
-        elif center > width * 0.52:
-            right.append(region)
-
-    if len(left) < 2 or len(right) < 2:
-        return False
-
-    left_span = max(r["bbox"][3] for r in left) - min(r["bbox"][1] for r in left)
-    right_span = max(r["bbox"][3] for r in right) - min(r["bbox"][1] for r in right)
-    return left_span > height * 0.25 and right_span > height * 0.25
-
-
-def text_density_is_low(text, bbox, threshold):
-    area = crop_area(bbox)
-    if area < 120000:
-        return False
-    density = len((text or "").strip()) / max(area, 1)
-    return density < threshold
-
-
-def add_text_risks(page_metadata, text, bbox, low_density_threshold):
-    if not text:
-        return
-
-    if SENSITIVE_TEXT_RE.search(text):
-        add_vlm_risk(
-            page_metadata,
-            "sensitive_value",
-            "Line/block contains money, date, ID, contract/order code, or other exact-value fields.",
-            bbox=bbox,
-            text=text,
-            severity="high",
-        )
-
-    if AMBIGUOUS_TOKEN_RE.search(text):
-        add_vlm_risk(
-            page_metadata,
-            "ambiguous_characters",
-            "Text contains OCR-ambiguous O/0, l/1, S/5-like tokens.",
-            bbox=bbox,
-            text=text,
-            severity="high",
-        )
-
-    if CHECKBOX_HINT_RE.search(text):
-        add_vlm_risk(
-            page_metadata,
-            "checkbox_or_selection",
-            "Text contains checkbox/selection hints that need visual verification.",
-            bbox=bbox,
-            text=text,
-            severity="medium",
-        )
-
-    if text_density_is_low(text, bbox, low_density_threshold):
-        add_vlm_risk(
-            page_metadata,
-            "ocr_too_short_for_region",
-            "OCR text is short compared with the visual area of this region.",
-            bbox=bbox,
-            text=text,
-            severity="medium",
-        )
-
-
 def attach_vlm_risk_assets(page_metadata, img, risk_assets_dir, output_folder, max_crops):
     for risk in page_metadata["vlm_risks"][:max_crops]:
         if "asset_path" in risk or "bbox" not in risk:
@@ -901,114 +672,6 @@ def attach_vlm_risk_assets(page_metadata, img, risk_assets_dir, output_folder, m
             risk["asset_path"] = relative_output_path(asset_path, output_folder)
 
 
-def is_markdown_passthrough_line(text):
-    stripped = text.strip()
-    return (
-        not stripped
-        or stripped.startswith("#")
-        or stripped.startswith("|")
-        or stripped.startswith("![")
-        or stripped.startswith("```")
-        or stripped.startswith("- ")
-        or stripped.startswith("+ ")
-        or stripped.startswith("* ")
-    )
-
-
-def has_letters(text):
-    return any(ch.isalpha() for ch in text)
-
-
-def is_short_heading_candidate(text, max_chars):
-    stripped = text.strip()
-    return 3 <= len(stripped) <= max_chars and has_letters(stripped)
-
-
-def normalize_dense_subsection(text, state):
-    parent_number = state.get("last_numbered_section")
-    if not parent_number or not text.startswith(parent_number):
-        return text
-
-    child_index = len(parent_number)
-    if child_index >= len(text) or not text[child_index].isdigit():
-        return text
-
-    child_number = text[child_index]
-    rest = text[child_index + 1:].lstrip(". ")
-    if not rest:
-        return text
-    return f"{parent_number}.{child_number}. {rest}"
-
-
-def classify_heading_line(text, state, max_chars):
-    stripped = text.strip()
-    if is_markdown_passthrough_line(stripped) or not is_short_heading_candidate(stripped, max_chars):
-        return None
-
-    if DOCUMENT_TITLE_RE.match(stripped):
-        if not state.get("document_title_seen"):
-            state["document_title_seen"] = True
-            state["last_numbered_section"] = None
-            return 1, "document_title", stripped
-        state["last_numbered_section"] = None
-        return 2, "document_section_title", stripped
-
-    if ARTICLE_RE.match(stripped):
-        state["last_numbered_section"] = None
-        return 2, "article", stripped
-
-    if RECEIVER_RE.match(stripped):
-        state["last_numbered_section"] = None
-        return 2, "receiver_section", stripped
-
-    chapter_match = CHAPTER_RE.match(stripped)
-    if chapter_match:
-        keyword = chapter_match.group(1).lower()
-        state["last_numbered_section"] = None
-        return (3 if keyword == "mục" else 2), keyword, stripped
-
-    subsection_match = NUMBERED_SUBSECTION_RE.match(stripped)
-    if subsection_match:
-        state["last_numbered_section"] = subsection_match.group(1)
-        return 4, "numbered_subsection", stripped
-
-    section_match = NUMBERED_SECTION_RE.match(stripped)
-    if section_match:
-        state["last_numbered_section"] = section_match.group(1)
-        return 3, "numbered_section", stripped
-
-    if DENSE_SUBSECTION_RE.match(stripped):
-        normalized_text = normalize_dense_subsection(stripped, state)
-        if normalized_text != stripped:
-            return 4, "dense_numbered_subsection", normalized_text
-
-    return None
-
-
-def apply_heading_detection(markdown_text, page_number, state, enabled=True, max_chars=180):
-    if not enabled:
-        return markdown_text, []
-
-    enhanced_lines = []
-    headings = []
-    for line in markdown_text.splitlines():
-        classification = classify_heading_line(line, state, max_chars)
-        if not classification:
-            enhanced_lines.append(line)
-            continue
-
-        level, reason, heading_text = classification
-        enhanced_lines.append(f"{'#' * level} {heading_text}")
-        headings.append({
-            "page_number": page_number,
-            "level": level,
-            "text": heading_text,
-            "reason": reason,
-        })
-
-    return "\n".join(enhanced_lines), headings
-
-
 def new_document_metadata(args, markdown_output_path):
     output_folder = os.path.dirname(markdown_output_path)
     return {
@@ -1018,140 +681,6 @@ def new_document_metadata(args, markdown_output_path):
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "pages": [],
     }
-
-
-def get_gemini_api_key(args):
-    api_key = args.gemini_api_key or os.environ.get("AI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    if api_key:
-        return api_key
-    return None
-
-
-def load_gemini_system_prompt(prompt_file):
-    prompt_file = prompt_file or DEFAULT_GEMINI_SYSTEM_PROMPT
-    if not os.path.isabs(prompt_file):
-        prompt_file = os.path.join(os.getcwd(), prompt_file)
-
-    with open(prompt_file, encoding="utf-8") as f:
-        return f.read().strip()
-
-
-def compact_metadata_for_gemini(metadata):
-    compact = {
-        "input": metadata.get("input"),
-        "output_markdown": metadata.get("output_markdown"),
-        "page_count": metadata.get("page_count"),
-        "region_count": metadata.get("region_count"),
-        "asset_count": metadata.get("asset_count"),
-        "ocr_confidence": metadata.get("ocr_confidence"),
-        "layout_confidence": metadata.get("layout_confidence"),
-        "gemini_postcheck_decision": metadata.get("gemini_postcheck_decision"),
-        "pages": [],
-    }
-
-    for page in metadata.get("pages", []):
-        compact_page = {
-            "page_number": page.get("page_number"),
-            "width": page.get("width"),
-            "height": page.get("height"),
-            "ocr_confidence": page.get("ocr_confidence"),
-            "layout_confidence": page.get("layout_confidence"),
-            "vlm_risks": page.get("vlm_risks", []),
-            "regions": [],
-        }
-        for region in page.get("regions", []):
-            compact_region = {
-                "content_type": region.get("content_type"),
-                "layout_type": region.get("layout_type"),
-                "bbox": region.get("bbox"),
-                "ocr_confidence": region.get("ocr_confidence"),
-            }
-            if region.get("asset_path"):
-                compact_region["asset_path"] = region.get("asset_path")
-            compact_page["regions"].append(compact_region)
-        compact["pages"].append(compact_page)
-
-    return compact
-
-
-def gemini_postcheck_schema():
-    return {
-        "type": "object",
-        "properties": {
-            "checked_markdown": {
-                "type": "string",
-                "description": "The corrected final Markdown. Preserve useful image links and table structure.",
-            },
-            "summary": {
-                "type": "string",
-                "description": "Short Vietnamese summary of the post-check result.",
-            },
-            "issues": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
-                        "page_number": {"type": ["integer", "null"]},
-                        "issue": {"type": "string"},
-                        "suggestion": {"type": "string"},
-                    },
-                    "required": ["severity", "page_number", "issue", "suggestion"],
-                },
-            },
-            "image_notes": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "page_number": {"type": ["integer", "null"]},
-                        "asset_path": {"type": ["string", "null"]},
-                        "description": {"type": "string"},
-                    },
-                    "required": ["page_number", "asset_path", "description"],
-                },
-            },
-            "vlm_findings": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "risk_id": {"type": ["string", "null"]},
-                        "page_number": {"type": ["integer", "null"]},
-                        "category": {"type": "string"},
-                        "finding": {"type": "string"},
-                        "correction": {"type": ["string", "null"]},
-                        "confidence": {"type": "number"},
-                    },
-                    "required": ["risk_id", "page_number", "category", "finding", "correction", "confidence"],
-                },
-            },
-            "confidence": {
-                "type": "number",
-                "description": "Confidence from 0 to 1 that the checked Markdown is faithful to the document.",
-            },
-        },
-        "required": ["checked_markdown", "summary", "issues", "image_notes", "vlm_findings", "confidence"],
-    }
-
-
-def format_token_usage(token_usage):
-    if not token_usage:
-        return "unavailable"
-
-    fields = [
-        ("prompt", "prompt_token_count"),
-        ("cached", "cached_content_token_count"),
-        ("output", "candidates_token_count"),
-        ("thinking", "thoughts_token_count"),
-        ("tool", "tool_use_prompt_token_count"),
-        ("total", "total_token_count"),
-    ]
-    return ", ".join(
-        f"{label}={token_usage[key]}"
-        for label, key in fields
-        if key in token_usage
-    ) or "unavailable"
 
 
 def find_unmasked_bands(inv_mask, min_gap_rows=8):
@@ -1508,6 +1037,7 @@ def main(args):
                         page_images_by_output.get(out_path, []),
                         args,
                         gemini_api_key,
+                        DEFAULT_GEMINI_SYSTEM_PROMPT,
                     )
                     document_metadata.pop("_output_folder", None)
                     token_usage = gemini_result.get("_token_usage", {})
@@ -1592,211 +1122,6 @@ def main(args):
             }
             with open(meta_path, "w+", encoding="utf-8") as f:
                 json.dump(document_metadata, f, ensure_ascii=False, indent=2)
-def parse_ai_json_response(content):
-    if isinstance(content, list):
-        text = "".join(
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") in (None, "text")
-        )
-    else:
-        text = str(content or "")
-
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-
-    first = text.find("{")
-    last = text.rfind("}")
-    if first >= 0 and last > first:
-        text = text[first : last + 1]
-    return json.loads(text)
-
-
-def openai_compatible_base_url(args):
-    base_url = (
-        getattr(args, "ai_base_url", None)
-        or os.environ.get("AI_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or "https://api.openai.com/v1"
-    )
-    return base_url.rstrip("/")
-
-
-def openai_compatible_chat_url(args):
-    base_url = openai_compatible_base_url(args)
-    if base_url.endswith("/chat/completions"):
-        return base_url
-    return f"{base_url}/chat/completions"
-
-
-def openai_compatible_token_usage(response_json):
-    usage = response_json.get("usage") or {}
-    completion_details = usage.get("completion_tokens_details") or {}
-    token_usage = {
-        "prompt_token_count": usage.get("prompt_tokens"),
-        "candidates_token_count": usage.get("completion_tokens"),
-        "thoughts_token_count": completion_details.get("reasoning_tokens"),
-        "total_token_count": usage.get("total_tokens"),
-    }
-    return {key: value for key, value in token_usage.items() if value not in (None, [], {})}
-
-
-def ai_env_float(name, default):
-    value = os.environ.get(name)
-    if value in (None, ""):
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-def ai_env_int(name, default=None):
-    value = os.environ.get(name)
-    if value in (None, ""):
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def image_to_openai_data_url(image, max_side):
-    img = image.copy()
-    if max_side and max(img.size) > max_side:
-        img.thumbnail((max_side, max_side))
-    if img.mode not in ("RGB", "L"):
-        img = img.convert("RGB")
-
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=85, optimize=True)
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/jpeg;base64,{encoded}"
-
-
-def openai_response_format(args):
-    mode = (
-        getattr(args, "ai_response_format", None)
-        or os.environ.get("AI_RESPONSE_FORMAT")
-        or os.environ.get("OPENAI_RESPONSE_FORMAT")
-        or "json_object"
-    ).strip().lower()
-
-    if mode in ("", "none", "disabled", "off"):
-        return None
-    if mode == "json_schema":
-        return {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "ocr_markdown_postcheck",
-                "schema": gemini_postcheck_schema(),
-                "strict": False,
-            },
-        }
-    return {"type": "json_object"}
-
-
-def run_gemini_postcheck(markdown_text, metadata, page_images, args, api_key):
-    system_prompt = load_gemini_system_prompt(args.gemini_system_prompt)
-    schema = gemini_postcheck_schema()
-    compact_metadata = compact_metadata_for_gemini(metadata)
-    max_input_chars = ai_env_int("AI_MAX_INPUT_CHARS", 40000)
-    if max_input_chars and len(markdown_text) > max_input_chars:
-        logging.warning(
-            f"Markdown input truncated from {len(markdown_text)} to {max_input_chars} chars (set AI_MAX_INPUT_CHARS to change)"
-        )
-        markdown_text = markdown_text[:max_input_chars] + "\n\n[... truncated ...]"
-    user_text = (
-        "Review and correct the OCR Markdown. Return JSON only, following this JSON schema:\n"
-        f"{json.dumps(schema, ensure_ascii=False)}\n\n"
-        "Source Markdown:\n"
-        f"{markdown_text}\n\n"
-        "Compact metadata:\n"
-        f"{json.dumps(compact_metadata, ensure_ascii=False)}\n\n"
-        "Detected VLM risks:\n"
-        f"{json.dumps(metadata.get('vlm_risks', []), ensure_ascii=False)}"
-    )
-
-    content = [{"type": "text", "text": user_text}]
-    include_images = env_bool("AI_INCLUDE_IMAGES", True)
-    if include_images:
-        max_pages = int(getattr(args, "gemini_max_pages", 6) or 6)
-        max_side = int(getattr(args, "gemini_image_max_side", 1600) or 1600)
-        for image in page_images[:max_pages]:
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_to_openai_data_url(image, max_side)},
-                }
-            )
-
-    payload = {
-        "model": args.gemini_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content},
-        ],
-        "temperature": ai_env_float("AI_TEMPERATURE", 0.0),
-    }
-    max_tokens = ai_env_int("AI_MAX_TOKENS", None)
-    if max_tokens:
-        payload["max_tokens"] = max_tokens
-
-    response_format = openai_response_format(args)
-    if response_format:
-        payload["response_format"] = response_format
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    chat_url = openai_compatible_chat_url(args)
-    try:
-        response = requests.post(
-            chat_url,
-            headers=headers,
-            json=payload,
-            timeout=float(args.gemini_timeout),
-        )
-        response.raise_for_status()
-    except requests.exceptions.Timeout as exc:
-        raise RuntimeError(
-            f"AI API request timed out: {chat_url}. Check AI_BASE_URL and whether the provider is reachable."
-        ) from exc
-    except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
-        raise RuntimeError(
-            f"Could not connect to AI API: {chat_url}. Check AI_BASE_URL and whether the provider is reachable."
-        ) from exc
-    except requests.exceptions.HTTPError as exc:
-        body = response.text[:1000] if response is not None else ""
-        raise RuntimeError(f"AI API returned HTTP {response.status_code} from {chat_url}: {body}") from exc
-    response_json = response.json()
-
-    choices = response_json.get("choices") or []
-    if not choices:
-        raise RuntimeError(f"OpenAI-compatible response has no choices: {response_json}")
-    message = choices[0].get("message") or {}
-    content_text = message.get("content", "")
-    try:
-        result = parse_ai_json_response(content_text)
-    except json.JSONDecodeError as exc:
-        snippet = str(content_text)[:1000]
-        raise RuntimeError(f"OpenAI-compatible response was not valid JSON: {snippet}") from exc
-
-    if "checked_markdown" not in result:
-        raise RuntimeError("OpenAI-compatible response JSON is missing checked_markdown")
-
-    result["_token_usage"] = openai_compatible_token_usage(response_json)
-    result["_raw_usage_metadata"] = response_json.get("usage", {})
-    return result
-
-
 if __name__ == "__main__":
     load_env_file()
 

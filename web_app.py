@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import difflib
-import hashlib
 import json
 import os
 import subprocess
@@ -17,6 +16,16 @@ from typing import Any
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from utils.pipeline_artifacts import (
+    correction_rule_id as build_correction_rule_id,
+    load_correction_memory as load_correction_memory_payload,
+    save_correction_memory as save_correction_memory_payload,
+)
+from utils.web_helpers import (
+    read_text_preview as read_text_preview_file,
+    safe_filename as build_safe_filename,
+    summarize_postcheck,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -29,6 +38,7 @@ PREVIEW_READ_LIMIT = 2 * 1024 * 1024
 CHANGE_SNIPPET_LIMIT = 1800
 REVERSALS_FILENAME = "vlm_reversals.json"
 CORRECTION_MEMORY_FILENAME = "ocr_correction_memory.json"
+CORRECTION_MEMORY_VERSION = 1
 HISTORY_FILENAME = "history.json"
 HISTORY_PATH = RUNS_DIR / HISTORY_FILENAME
 HISTORY_VERSION = 1
@@ -69,11 +79,7 @@ def now_iso(timestamp: float | None) -> str | None:
 
 
 def safe_filename(filename: str) -> str:
-    name = Path(filename).name.strip()
-    if not name:
-        return "upload"
-    safe = "".join(ch for ch in name if ch.isalnum() or ch in "._- ()").strip()
-    return safe or "upload"
+    return build_safe_filename(filename)
 
 
 def require_job(job_id: str) -> JobState:
@@ -133,10 +139,7 @@ def read_metadata(metadata_path: Path | None) -> dict[str, Any]:
 
 
 def read_text_preview(path: Path) -> tuple[str, bool]:
-    size = path.stat().st_size
-    with path.open("rb") as handle:
-        content = handle.read(PREVIEW_READ_LIMIT)
-    return content.decode("utf-8", errors="replace"), size > PREVIEW_READ_LIMIT
+    return read_text_preview_file(path, PREVIEW_READ_LIMIT)
 
 
 def discover_outputs(output_dir: Path) -> tuple[Path | None, Path | None, dict[str, Any]]:
@@ -171,14 +174,7 @@ def discover_output_files(output_dir: Path) -> dict[str, Any]:
 
 
 def summarize_gemini(metadata: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
-    postcheck = metadata.get("ai_postcheck") or metadata.get("gemini_postcheck")
-    if isinstance(postcheck, dict):
-        status = str(postcheck.get("status") or "unknown")
-        token_usage = postcheck.get("token_usage")
-        return status, token_usage if isinstance(token_usage, dict) and token_usage else None
-    if metadata:
-        return "disabled", None
-    return "unavailable", None
+    return summarize_postcheck(metadata)
 
 
 def _read_history_file() -> list[dict[str, Any]]:
@@ -375,33 +371,15 @@ def correction_memory_path() -> Path:
 
 
 def correction_rule_id(wrong: str, correct: str) -> str:
-    return hashlib.sha256(f"{wrong}\0{correct}".encode("utf-8")).hexdigest()[:16]
+    return build_correction_rule_id(wrong, correct)
 
 
 def load_correction_memory() -> dict[str, Any]:
-    path = correction_memory_path()
-    if not path.exists():
-        return {"version": 1, "rules": [], "blocked": []}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"version": 1, "rules": [], "blocked": []}
-    if not isinstance(payload, dict):
-        return {"version": 1, "rules": [], "blocked": []}
-    payload.setdefault("version", 1)
-    payload.setdefault("rules", [])
-    payload.setdefault("blocked", [])
-    if not isinstance(payload["rules"], list):
-        payload["rules"] = []
-    if not isinstance(payload["blocked"], list):
-        payload["blocked"] = []
-    return payload
+    return load_correction_memory_payload(str(correction_memory_path()), CORRECTION_MEMORY_VERSION)
 
 
 def save_correction_memory(memory: dict[str, Any]) -> None:
-    path = correction_memory_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_correction_memory_payload(str(correction_memory_path()), memory)
 
 
 def change_text_by_id(job: JobState, change_id: int) -> tuple[str, str] | None:
