@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+!.env.docker.example
+!.env.rocm.example
+
+__pycache__/
+*.py[cod]
+
+log/
+output/
+web_runs/
+conf/ocr_correction_memory.json
+venv/
+.gitnexus
+.claude/
+input/

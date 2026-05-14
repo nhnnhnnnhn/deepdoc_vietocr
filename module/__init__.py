@@ -37,18 +37,25 @@ def init_in_out(args):
     images = []
     outputs = []
 
-    if not os.path.exists(args.output_dir):
-        os.mkdir(args.output_dir)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    def output_folder_for(fnm):
+        stem = os.path.splitext(os.path.basename(fnm))[0]
+        folder = os.path.join(args.output_dir, stem)
+        os.makedirs(folder, exist_ok=True)
+        return folder, stem
 
     def pdf_pages(fnm, zoomin=3):
         nonlocal outputs, images
         with sys.modules[LOCK_KEY_pdfplumber]:
             pdf = pdfplumber.open(fnm)
-            images = [p.to_image(resolution=72 * zoomin).annotated for i, p in
-                                enumerate(pdf.pages)]
+            page_images = [p.to_image(resolution=72 * zoomin).annotated for i, p in
+                           enumerate(pdf.pages)]
 
-        for i, page in enumerate(images):
-            outputs.append(os.path.split(fnm)[-1] + f"_{i}.jpg")
+        folder, stem = output_folder_for(fnm)
+        images.extend(page_images)
+        for i, _ in enumerate(page_images):
+            outputs.append(os.path.join(folder, f"{stem}_{i}.jpg"))
         pdf.close()
 
     def images_and_outputs(fnm):
@@ -61,7 +68,8 @@ def init_in_out(args):
             binary = fp.read()
             fp.close()
             images.append(Image.open(io.BytesIO(binary)).convert('RGB'))
-            outputs.append(os.path.split(fnm)[-1])
+            folder, _ = output_folder_for(fnm)
+            outputs.append(os.path.join(folder, os.path.basename(fnm)))
         except Exception:
             traceback.print_exc()
 
@@ -70,9 +78,6 @@ def init_in_out(args):
             images_and_outputs(fnm)
     else:
         images_and_outputs(args.inputs)
-
-    for i in range(len(outputs)):
-        outputs[i] = os.path.join(args.output_dir, outputs[i])
 
     return images, outputs
 

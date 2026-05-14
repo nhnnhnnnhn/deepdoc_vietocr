@@ -31,7 +31,7 @@ from .ocr import load_model
 # from from module.ocr_onnx import OCR
 
 class Recognizer:
-    def __init__(self, label_list, task_name, model_dir=None):
+    def __init__(self, label_list, task_name, model_dir=None, device="auto"):
         """
         If you have trouble downloading HuggingFace models, -_^ this might help!!
 
@@ -47,7 +47,7 @@ class Recognizer:
             model_dir = os.path.join(
                         get_project_base_directory(),
                         "onnx")
-        self.ort_sess, self.run_options = load_model(model_dir, task_name)
+        self.ort_sess, self.run_options = load_model(model_dir, task_name, device=device)
         self.input_names = [node.name for node in self.ort_sess.get_inputs()]
         self.output_names = [node.name for node in self.ort_sess.get_outputs()]
         self.input_shape = self.ort_sess.get_inputs()[0].shape[2:4]

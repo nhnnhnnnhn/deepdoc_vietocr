@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OCR to Markdown</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace" aria-labelledby="page-title">
+        <div class="topbar">
+          <div>
+            <p class="eyebrow">DeepDoc VietOCR</p>
+            <h1 id="page-title">OCR to Markdown</h1>
+          </div>
+          <div class="topbar-right">
+            <div id="statusBadge" class="status-badge idle">Idle</div>
+            <button id="historyToggle" type="button" class="ghost">History</button>
+          </div>
+        </div>
+
+        <div class="grid">
+          <section class="panel upload-panel" aria-labelledby="upload-title">
+            <div class="panel-heading">
+              <h2 id="upload-title">Upload</h2>
+              <p>PDF, PNG, JPG, TIFF, or BMP</p>
+            </div>
+
+            <div id="dropzone" class="dropzone" tabindex="0">
+              <input id="fileInput" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp">
+              <div class="drop-mark" aria-hidden="true">
+                <span></span>
+              </div>
+              <div>
+                <strong id="fileName">Drop files here</strong>
+                <p id="fileMeta">or choose from disk</p>
+              </div>
+            </div>
+
+            <div class="actions">
+              <button id="chooseButton" type="button" class="secondary">Choose File</button>
+              <button id="startButton" type="button" disabled>Start OCR</button>
+            </div>
+            <p id="message" class="message" role="status"></p>
+          </section>
+
+          <section class="panel metrics-panel" aria-labelledby="queue-title">
+            <div class="panel-heading inline">
+              <div>
+                <h2 id="queue-title">Queue</h2>
+                <p id="queueMeta">Không có job nào</p>
+              </div>
+              <button id="clearDoneButton" type="button" class="ghost" disabled>Xóa đã xong</button>
+            </div>
+            <div id="queueList" class="queue-list">
+              <p class="queue-empty">Chưa có file nào được nạp.</p>
+            </div>
+          </section>
+        </div>
+
+        <section class="panel log-panel" aria-labelledby="log-title">
+          <div class="panel-heading inline">
+            <div>
+              <h2 id="log-title">Log</h2>
+              <p id="logMeta">Waiting for a job</p>
+            </div>
+            <button id="clearLogButton" type="button" class="ghost">Clear</button>
+          </div>
+          <pre id="logOutput" aria-live="polite"></pre>
+        </section>
+      </section>
+    </main>
+
+    <div id="previewModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="previewTitle">
+      <section class="preview-modal">
+        <div class="preview-header">
+          <div>
+            <p id="previewKind" class="eyebrow">Preview</p>
+            <h2 id="previewTitle">Output</h2>
+          </div>
+          <div class="preview-actions">
+            <a id="previewDownload" class="download" href="#">Download</a>
+            <button id="closePreview" type="button" class="secondary">Close</button>
+          </div>
+        </div>
+        <p id="previewNotice" class="preview-notice"></p>
+        <pre id="previewBody"></pre>
+        <div id="changesBody" class="changes-body hidden"></div>
+      </section>
+    </div>
+
+    <aside id="historyDrawer" class="history-drawer hidden" aria-hidden="true" aria-labelledby="historyTitle">
+      <div class="history-header">
+        <div>
+          <p class="eyebrow">OCR History</p>
+          <h2 id="historyTitle">Lịch sử OCR</h2>
+        </div>
+        <div class="history-actions">
+          <button id="historyRefresh" type="button" class="ghost">Refresh</button>
+          <button id="historyClose" type="button" class="secondary">Đóng</button>
+        </div>
+      </div>
+      <p id="historyMeta" class="preview-notice"></p>
+      <div id="historyList" class="history-list"></div>
+    </aside>
+    <div id="historyBackdrop" class="drawer-backdrop hidden"></div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

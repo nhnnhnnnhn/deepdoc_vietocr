@@ -43,17 +43,19 @@ class LayoutRecognizer(Recognizer):
         "Equation",
     ]
 
-    def __init__(self, domain):
+    def __init__(self, domain, device="auto"):
         try:
             model_dir = os.path.join(
                 get_project_base_directory(),
                 "onnx")
-            super().__init__(self.labels, domain, model_dir)
-        except Exception:
+            super().__init__(self.labels, domain, model_dir, device=device)
+        except ValueError as exc:
+            if "not find model file path" not in str(exc):
+                raise
             model_dir = snapshot_download(repo_id="InfiniFlow/deepdoc",
                                           local_dir=os.path.join(get_project_base_directory(), "onnx"),
                                           local_dir_use_symlinks=False)
-            super().__init__(self.labels, domain, model_dir)
+            super().__init__(self.labels, domain, model_dir, device=device)
 
         self.garbage_layouts = ["footer", "header", "reference"]
         self.client = None
@@ -180,9 +182,9 @@ class LayoutRecognizer4YOLOv10(LayoutRecognizer):
         "Figure caption",
     ]
 
-    def __init__(self, domain):
+    def __init__(self, domain, device="auto"):
         domain = "layout"
-        super().__init__(domain)
+        super().__init__(domain, device=device)
         self.auto = False
         self.scaleFill = False
         self.scaleup = True

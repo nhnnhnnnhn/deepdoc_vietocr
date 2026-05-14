@@ -1,0 +1,45 @@
+services:
+  deepdoc-vietocr:
+    build:
+      context: .
+      dockerfile: Dockerfile.rocm
+    image: deepdoc-vietocr:rocm
+    container_name: deepdoc-vietocr-rocm
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      DEVICE: ${DEVICE:-auto}
+      REQUIRE_GPU: ${REQUIRE_GPU:-1}
+      OCR_CORRECTION_MEMORY_PATH: ${OCR_CORRECTION_MEMORY_PATH:-/app/web_runs/ocr_correction_memory.json}
+      HIP_VISIBLE_DEVICES: ${HIP_VISIBLE_DEVICES:-0}
+    ports:
+      - "${WEB_PORT:-8000}:8008"
+    volumes:
+      - deepdoc_input:/app/input
+      - deepdoc_output:/app/output
+      - deepdoc_web_runs:/app/web_runs
+      - deepdoc_log:/app/log
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    security_opt:
+      - seccomp=unconfined
+    shm_size: "2gb"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  deepdoc_input:
+  deepdoc_output:
+  deepdoc_web_runs:
+  deepdoc_log:

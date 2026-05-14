@@ -1,0 +1,45 @@
+ARG ROCM_IMAGE=rocm/onnxruntime:rocm7.2.3_ub24.04_ort1.23_torch2.10.0
+FROM ${ROCM_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Inherit torch, onnxruntime, and MIGraphX from the ROCm base image.
+# --system-site-packages makes these available inside the venv without reinstalling.
+RUN python3 -m venv --system-site-packages /opt/venv
+
+COPY requirements-rocm.txt .
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install -r requirements-rocm.txt
+
+COPY . .
+RUN chmod +x docker/entrypoint-rocm.sh \
+    && mkdir -p input output web_runs log \
+    && test -f conf/ai_postcheck_system_prompt.txt \
+    && test -f onnx/det.onnx \
+    && test -f onnx/layout.onnx \
+    && test -f onnx/tsr.onnx \
+    && test -f vietocr/weight/vgg_seq2seq.pth \
+    && python -m py_compile web_app.py full_pipeline.py
+
+EXPOSE 8008
+
+ENTRYPOINT ["docker/entrypoint-rocm.sh"]
+CMD ["python", "-m", "uvicorn", "web_app:app", "--host", "0.0.0.0", "--port", "8008"]

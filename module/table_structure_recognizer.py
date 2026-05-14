@@ -35,15 +35,17 @@ class TableStructureRecognizer(Recognizer):
         "table spanning cell",
     ]
 
-    def __init__(self):
+    def __init__(self, device="auto"):
         try:
             super().__init__(self.labels, "tsr", os.path.join(
                     get_project_base_directory(),
-                    "onnx"))
-        except Exception:
+                    "onnx"), device=device)
+        except ValueError as exc:
+            if "not find model file path" not in str(exc):
+                raise
             super().__init__(self.labels, "tsr", snapshot_download(repo_id="InfiniFlow/deepdoc",
                                               local_dir=os.path.join(get_project_base_directory(), "onnx"),
-                                              local_dir_use_symlinks=False))
+                                              local_dir_use_symlinks=False), device=device)
 
     def __call__(self, images, thr=0.2):
         tbls = super().__call__(images, thr)
