@@ -8,6 +8,7 @@
 - [1. Giới thiệu](#1)
 - [2. Kiến trúc kỹ thuật](#2)
 - [3. Cài đặt và chạy thử](#3)
+- [4. Docker (GPU Web UI)](#4)
 
 <a name="1"></a>
 
@@ -85,78 +86,128 @@ Trong DeepDoc, YOLOv10 được huấn luyện để nhận dạng các loại n
 
 ## 3. Cài đặt và chạy thử
 
-Đầu tiên bạn clone git về máy:
+Clone repo về máy:
 ```bash
-git clone https://github.com/hoaivannguyen/deepdoc_vietocr.git
+git clone https://github.com/nhnnhnnnhn/deepdoc_vietocr.git
+cd deepdoc_vietocr
 ```
-Một số cài đặt trước khi chạy chương trình:
-```bash
-python t_ocr.py -h
-usage: t_ocr.py [-h] --inputs INPUTS [--output_dir OUTPUT_DIR]
 
-options:
-  -h, --help            hiển thị thông báo trợ giúp này và thoát
-  --inputs INPUTS       Thư mục lưu trữ hình ảnh hoặc tệp PDF hoặc đường dẫn tệp đến một hình ảnh hoặc tệp PDF duy nhất
-  --output_dir OUTPUT_DIR
-                        Thư mục lưu trữ hình ảnh đầu ra. Mặc định: './ocr_outputs'
-```
+Cài đặt dependencies:
 ```bash
-python t_recognizer.py -h
-usage: t_recognizer.py [-h] --inputs INPUTS [--output_dir OUTPUT_DIR] [--threshold THRESHOLD] [--mode {layout,tsr}]
-
-options:
-  -h, --help            hiển thị thông báo trợ giúp này và thoát
-  --inputs INPUTS       Thư mục lưu trữ hình ảnh hoặc tệp PDF hoặc đường dẫn tệp đến một hình ảnh hoặc tệp PDF duy nhất
-  --output_dir OUTPUT_DIR
-                        Thư mục lưu trữ hình ảnh đầu ra. Mặc định: './layouts_outputs'
-  --threshold THRESHOLD
-                        Ngưỡng để lọc ra các phát hiện. Mặc định: 0.5
-  --mode {layout,tsr}   Chế độ tác vụ: nhận dạng bố cục (layout) hoặc nhận dạng cấu trúc bảng (tsr)
+pip install -r requirements.txt
 ```
+
+Đặt file trọng số VietOCR vào đúng đường dẫn:
+```
+vietocr/weight/vgg_seq2seq.pth
+```
+
+Các file ONNX (`det.onnx`, `layout.onnx`, `tsr.onnx`) sẽ tự tải về từ HuggingFace lần đầu chạy. Nếu gặp lỗi kết nối (thường trên Windows), đặt biến môi trường trước:
+```bash
+set HF_ENDPOINT=https://hf-mirror.com
+```
+
 ### 3.1. OCR
-Để chạy thử OCR, bạn có thể sử dụng lệnh sau:
- ```bash
+```bash
 python t_ocr.py --inputs=path_to_images_or_pdfs --output_dir=path_to_store_result
 ```
-Đầu vào có thể là thư mục chứa hình ảnh hoặc PDF, hoặc một hình ảnh hoặc PDF. Đầu ra sẽ gồm 1 ảnh với các bounding box được nhận diện và 1 file txt chứa văn bản được OCR.
+Đầu vào có thể là thư mục chứa hình ảnh hoặc PDF, hoặc một file đơn lẻ. Đầu ra gồm 1 ảnh với các bounding box được nhận diện và 1 file `.txt` chứa văn bản OCR.
+
 <div align="center" style="margin-top:20px;margin-bottom:20px;">
 <img src="img\Screenshot 2025-08-28 171633.png" width="900"/>
 </div>
 
-Mình đang để mặc định là VietOCR Seq2seq vì hiện đang chạy tương đối nhanh và chính xác. Bạn có thể đổi sang VietOCR Transformer trong module/ocr.py nhưng mình không đề xuất vì thời gian xử lý lâu hơn rất nhiều mà độ chuẩn xác không tănng lên là mấy. Nếu bạn muốn nhanh nhất có thể chuyển sang sử dụng bản ONNX bằng việc import ocr_onnx thay vì ocr nhưng độ chính xác sẽ giảm đi 1 chút.
+Mặc định dùng VietOCR Seq2seq — nhanh và chính xác. Có thể đổi sang Transformer trong `module/ocr.py` nhưng không khuyến nghị (chậm hơn nhiều, độ chính xác tăng không đáng kể). Nếu cần tốc độ tối đa, import `ocr_onnx` thay cho `ocr` (độ chính xác giảm nhẹ).
 
-### 3.2. Layout Recognizer (Nhận diện bố cục)
-Hãy thử lệnh sau để xem kết quả Layout Recognizer:
+### 3.2. Layout Recognizer
 ```bash
 python t_recognizer.py --inputs=path_to_images_or_pdfs --threshold=0.2 --mode=layout --output_dir=path_to_store_result
 ```
-Đầu vào có thể là thư mục chứa hình ảnh hoặc PDF, hoặc một hình ảnh hoặc PDF. Đầu ra sẽ gồm 1 ảnh với các gán nhãn như dưới đây:
+Đầu ra gồm 1 ảnh với nhãn bố cục:
 <div align="center" style="margin-top:20px;margin-bottom:20px;">
 <img src="img\49806-Article Text-153529-1-10-20200804_page-0002.jpg" width="1000"/>
 </div>
 
-## 3.3 Table Structure Recognizer
-Hãy thử lệnh sau để xem kết quả TSR.
+### 3.3. Table Structure Recognizer
 ```bash
 python t_recognizer.py --inputs=path_to_images_or_pdfs --threshold=0.2 --mode=tsr --output_dir=path_to_store_result
 ```
-
-Đầu vào có thể là thư mục chứa hình ảnh hoặc PDF, hoặc một hình ảnh hoặc PDF. Đầu ra sẽ là 1 ảnh với gán nhãn và 1 file markdown với nội dung bảng
+Đầu ra gồm 1 ảnh gán nhãn và 1 file `.md` với nội dung bảng được trích xuất:
 <div align="center" style="margin-top:20px;margin-bottom:20px;">
 <img src="img\Screenshot 2025-08-28 182132.png" width="1000"/>
 </div>
 
-## Kết
-Hy vọng các bạn thấy công cụ hữu ích và áp dụng được vào thực tế. Nếu có góp ý hãy để lại dưới phần bình luận. Cảm ơn các bạn đã đọc bài viết! 
+### 3.4. Full Pipeline
+Chạy toàn bộ pipeline: Layout → Table Markdown + OCR các vùng còn lại → file `.md` hợp nhất:
+```bash
+python full_pipeline.py --inputs=path_to_images_or_pdfs --output_dir=./output --threshold=0.5
+```
 
+> **Lưu ý:** Tất cả script chuyển output sang file log trong `log/`. Không có output trên console — kiểm tra `log/t_ocr.log`, `log/t_recognizer.log`, hoặc `log/full_pipeline.log`.
+
+<a name="4"></a>
+
+## 4. Docker (GPU Web UI)
+
+Dự án có sẵn Docker image với giao diện web để upload file và xem kết quả OCR trực tiếp trên trình duyệt.
+
+### 4.1. NVIDIA CUDA
+
+**Yêu cầu:** NVIDIA driver + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+
+Kiểm tra GPU:
+```bash
+docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
+```
+
+Build và chạy:
+```bash
+cp .env.docker.example .env
+# Chỉnh sửa .env nếu cần
+docker compose build
+docker compose up
+```
+
+### 4.2. AMD ROCm 7
+
+**Yêu cầu:** ROCm 7.x driver (`amdgpu-dkms`) trên host. Không cần cài ROCm user-space — đã có trong Docker image.
+
+Kiểm tra GPU:
+```bash
+ls /dev/kfd /dev/dri/renderD*
+```
+
+Thêm user vào group (nếu chưa có):
+```bash
+sudo usermod -aG video,render $USER  # cần re-login sau lệnh này
+```
+
+Build và chạy:
+```bash
+cp .env.rocm.example .env
+docker compose -f docker-compose.rocm.yml build
+docker compose -f docker-compose.rocm.yml up
+```
+
+> **Lần đầu chạy:** MIGraphX sẽ compile các ONNX model, request đầu tiên có thể chậm hơn 30–90 giây. Các lần sau chạy bình thường.
+
+### 4.3. Truy cập Web UI
+
+Sau khi container khởi động:
+```
+http://127.0.0.1:8000
+```
+
+Xem thêm chi tiết cấu hình, biến môi trường và troubleshooting tại [DOCKER.md](./DOCKER.md).
+
+---
+
+## Kết
+Hy vọng các bạn thấy công cụ hữu ích và áp dụng được vào thực tế. Nếu có góp ý hãy mở Issue hoặc Pull Request. Cảm ơn các bạn đã đọc!
 
 ## Tài liệu tham khảo
-DeepDoc repo: https://github.com/infiniflow/ragflow/blob/main/deepdoc/README.md
-
-PP-OCRv5: https://arxiv.org/html/2507.05595v1
-
-VietOCR: https://github.com/pbcquoc/vietocr
-
-VietOCR ONNX: https://viblo.asia/p/chuyen-doi-mo-hinh-hoc-sau-ve-onnx-bWrZnz4vZxw
-
-YOLOv10: https://arxiv.org/pdf/2405.14458
+- DeepDoc: https://github.com/infiniflow/ragflow/blob/main/deepdoc/README.md
+- PP-OCRv5: https://arxiv.org/html/2507.05595v1
+- VietOCR: https://github.com/pbcquoc/vietocr
+- VietOCR ONNX: https://viblo.asia/p/chuyen-doi-mo-hinh-hoc-sau-ve-onnx-bWrZnz4vZxw
+- YOLOv10: https://arxiv.org/pdf/2405.14458
